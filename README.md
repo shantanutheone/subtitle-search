@@ -1,4 +1,4 @@
-# subtitle-searchSubtitle Search System
+# Subtitle Search System
 The Subtitle Search System is a tool that allows users to search for specific text within the subtitles of movies. It provides the context in which the text appears and also indicates the movies where the text is found.
 
 <h2>Overview</h2>
@@ -86,8 +86,7 @@ Response:
         "...",
         "Context line 5"
       ]
-    },
-    ...
+    }
   ]
 }
 ```
