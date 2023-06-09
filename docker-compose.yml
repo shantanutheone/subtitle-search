@@ -1,15 +1,7 @@
 version: '3'
 
 services:
-  subtitle_search:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    ports:
-      - 5000:5000
-    depends_on:
-      - mysql
-      - elasticsearch
+  
   mysql:
     image: mysql:5.7
     volumes:
@@ -27,7 +19,16 @@ services:
       - elasticsearch_data:/usr/share/elasticsearch/data
     environment:
       - discovery.type=single-node
-
+      
+  subtitle_search:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - 5000:5000
+    depends_on:
+      - mysql
+      - elasticsearch
   
 
 volumes:

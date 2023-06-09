@@ -1,19 +1,35 @@
 from flask import Flask, request, jsonify
 from elasticsearch import Elasticsearch
+from datetime import datetime
 import mysql.connector
+import srt
+import logging
+import retrying
+
+# Set up the logging configuration
+logging.basicConfig(level=logging.DEBUG)
 
 app = Flask(__name__)
 
-# Elasticsearch connection settings
-es = Elasticsearch(
-    hosts=[
-        {
-            'host': 'localhost',
-            'port': 9200,
-            'scheme': 'http'  # Add the 'scheme' component here
-        }
-    ]
-)
+@retrying.retry(wait_fixed=2000, stop_max_attempt_number=5, retry_on_exception=lambda e: isinstance(e, ConnectionError))
+def connect_to_elasticsearch():
+    es = Elasticsearch(
+        hosts=[
+            {
+                'host': 'localhost',
+                'port': 9200,
+                'scheme': 'http'
+            }
+        ]
+    )
+    return es
+
+try:
+    es = connect_to_elasticsearch()
+    # Continue with Elasticsearch operations
+except ConnectionError as e:
+    # Handle connection errors
+    print(f"Failed to connect to Elasticsearch: {e}")
 
 
 mysql_config = {
@@ -97,14 +113,13 @@ def write_to_mysql(movie_name, subtitle_data):
     # Insert each subtitle into MySQL
     for subtitle in subtitle_data:
         line_id = subtitle['line_id']
-        start_time = subtitle['start_time']
-        end_time = subtitle['end_time']
+        start_time = datetime.fromtimestamp(subtitle['start_time']).strftime('%H:%M:%S')
+        end_time = datetime.fromtimestamp(subtitle['end_time']).strftime('%H:%M:%S')
         text = subtitle['text']
         cursor.execute(query, (movie_id, movie_name, line_id, start_time, end_time, text))
 
     # Commit the changes to the database
     cnx.commit()
-
 
 def write_to_elasticsearch(movie_name, subtitle_data):
     # Index each subtitle into Elasticsearch
@@ -122,44 +137,105 @@ def write_to_elasticsearch(movie_name, subtitle_data):
 
 @app.route('/upload', methods=['POST'])
 def upload_subtitle():
-    # Get the movie_name from the request form data
+    file = request.files.get('srt_file')
     movie_name = request.form.get('movie_name')
 
-    # Get the uploaded SRT file
-    srt_file = request.files.get('srt_file')
-    if not srt_file:
-        return jsonify({"error": "No SRT file uploaded."}), 400
+    if not movie_name:
+        return jsonify(error='Movie name is required.')
 
-    # Process the SRT file and extract subtitle data
+    try:
+        content = file.read().decode('utf-8')
+    except UnicodeDecodeError:
+        logging.debug("UnicodeDecodeError occurred!")
+        try:
+            file.seek(0)  # Reset the file pointer to the beginning
+            content = file.read().decode("latin-1")
+        except Exception as e:
+            logging.debug("Exception occurred in Latin-1 conversion:", str(e))
+
+    logging.debug(content)
+    # Parse the SRT content
+    subs = srt.parse(content)
+
     subtitle_data = []
-    for line in srt_file.readlines():
-        line = line.strip().decode('utf-8')
-        if line.isdigit():
-            # Found the line number, prepare for the next subtitle entry
-            subtitle = {}
-            subtitle['start_time'], subtitle['end_time'] = srt_file.readline().strip().split(' --> ')
-
-            # Read multiple lines for the subtitle text
-            text_lines = []
-            while True:
-                text_line = srt_file.readline().strip()
-                if not text_line or text_line.isdigit():
-                    # Reached the end of the text or encountered the next line number
-                    break
-                text_lines.append(text_line)
-            
-            # Concatenate the text lines into a single string
-            subtitle['text'] = ' '.join(text_lines)
-            
-            subtitle_data.append(subtitle)
-
+    for i, subtitle in enumerate(subs):
+        data = {
+            'line_id': i + 1,
+            'start_time': subtitle.start.total_seconds(),
+            'end_time': subtitle.end.total_seconds(),
+            'text': subtitle.content
+        }
+        subtitle_data.append(data)
+    logging.debug(subtitle_data)
     # Write subtitle data to MySQL
     write_to_mysql(movie_name, subtitle_data)
 
-    # Write subtitle data to Elasticsearch
+    # # Write subtitle data to Elasticsearch
     write_to_elasticsearch(movie_name, subtitle_data)
 
     return jsonify({"message": "Subtitle uploaded successfully."}), 200
 
+@app.route('/subtitles', methods=['GET'])
+def get_subtitles():
+    # Connect to the MySQL database
+    connection = mysql.connector.connect(**mysql_config)
+    cursor = connection.cursor()
+
+    # Retrieve all rows from the "subtitles" table
+    query = "SELECT * FROM subtitles"
+    cursor.execute(query)
+    rows = cursor.fetchall()
+
+    # Close the database connection
+    cursor.close()
+    connection.close()
+
+    # Format the rows as a list of dictionaries
+    subtitles = []
+    for row in rows:
+        subtitle = {
+            'movie_id': row[0],
+            'movie_name': row[1],
+            'line_id': row[2],
+            'start_time': str(row[3]),
+            'end_time': str(row[4]),
+            'text': row[5]
+        }
+        subtitles.append(subtitle)
+
+    # Return the subtitles line by line
+    response = ''
+    for subtitle in subtitles:
+        response += f"Line ID: {subtitle['line_id']}\n"
+        response += f"Movie Name: {subtitle['movie_name']}\n"
+        response += f"Start Time: {subtitle['start_time']}\n"
+        response += f"End Time: {subtitle['end_time']}\n"
+        response += f"Text: {subtitle['text']}\n"
+        response += '\n'
+
+    return response
+
+@app.route('/movies', methods=['GET'])
+def get_movies():
+    try:
+        # Connect to MySQL
+        cnx = mysql.connector.connect(**mysql_config)
+        cursor = cnx.cursor()
+
+        # Retrieve movie names
+        query = "SELECT movie_name FROM subtitles"
+        cursor.execute(query)
+        movies = [row[0] for row in cursor.fetchall()]
+
+        # Close MySQL connection
+        cursor.close()
+        cnx.close()
+
+        # Return the movie names as JSON response
+        return jsonify(movies)
+
+    except mysql.connector.Error as err:
+        # Handle MySQL errors
+        return str(err), 500
 if __name__ == '__main__':
     app.run(debug=True)

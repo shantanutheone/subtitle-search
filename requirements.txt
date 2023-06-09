@@ -1,3 +1,5 @@
 elasticsearch
 flask
 mysql-connector-python
+srt
+retrying
